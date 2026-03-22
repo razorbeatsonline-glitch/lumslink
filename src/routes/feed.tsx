@@ -18,6 +18,10 @@ type PostRow = {
   media_url: string | null
   media_type: 'image' | 'video' | null
   created_at: string
+  post_type: 'normal' | 'confession' | null
+  is_anonymous: boolean | null
+  anonymous_label: string | null
+  category: string | null
 }
 
 type ProfilePreview = {
@@ -51,6 +55,10 @@ type FeedComment = CommentRow & {
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime'])
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024
 const MAX_VIDEO_SIZE = 50 * 1024 * 1024
+const CONFESSION_CATEGORIES = ['Crushes', 'Rants', 'Funny', 'Academic', 'Hostel Life', 'Random', 'Tea'] as const
+const REACTION_OPTIONS = ['👀', '😭', '💀', '❤️', '😳'] as const
+
+type ReactionEmoji = (typeof REACTION_OPTIONS)[number]
 
 function formatPostDate(value: string) {
   const parsed = new Date(value)
@@ -91,6 +99,32 @@ function getPostMediaStoragePath(mediaUrl: string | null) {
   }
 }
 
+function isPostAnonymous(post: Pick<PostRow, 'is_anonymous' | 'post_type'>) {
+  return post.is_anonymous === true || post.post_type === 'confession'
+}
+
+function generateAnonymousLabel(profile: { class_year?: string | null; bio?: string | null } | null) {
+  const bio = profile?.bio?.toLowerCase() ?? ''
+  if (/\b(hostel|hostelite|dorm)\b/.test(bio)) {
+    return 'Hostelite'
+  }
+
+  if (/\b(sdsb|business school)\b/.test(bio)) {
+    return 'SDSB Student'
+  }
+
+  const classYear = profile?.class_year?.trim()
+  if (classYear) {
+    return `Class of ${classYear}`
+  }
+
+  return 'LUMS Student'
+}
+
+function reactionStorageKey(userId: string) {
+  return `lumslink:post-reaction:${userId}`
+}
+
 function HeartIcon({ className = '' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
@@ -98,6 +132,20 @@ function HeartIcon({ className = '' }: { className?: string }) {
         d="M12 21.35 10.55 20C5.4 15.23 2 12.08 2 8.24 2 5.1 4.42 2.7 7.5 2.7c1.74 0 3.41.82 4.5 2.12 1.09-1.3 2.76-2.12 4.5-2.12 3.08 0 5.5 2.4 5.5 5.54 0 3.84-3.4 6.99-8.55 11.77L12 21.35Z"
         fill="currentColor"
       />
+    </svg>
+  )
+}
+
+function AnonymousMaskIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
+      <path
+        d="M4.5 9.5c0-4.14 3.36-7.5 7.5-7.5s7.5 3.36 7.5 7.5v2.2l1.25 1.65c.35.47.02 1.15-.56 1.15h-2.14v2.05a2.45 2.45 0 0 1-2.45 2.45h-7.2a2.45 2.45 0 0 1-2.45-2.45V14.5H3.8c-.58 0-.91-.68-.56-1.15l1.26-1.65V9.5Z"
+        fill="currentColor"
+      />
+      <circle cx="9.2" cy="10.5" r="1.2" fill="#fff" />
+      <circle cx="14.8" cy="10.5" r="1.2" fill="#fff" />
+      <path d="M8.6 14.2c.9.7 2.05 1.05 3.4 1.05 1.35 0 2.5-.35 3.4-1.05" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }
@@ -127,6 +175,8 @@ function FeedPage() {
   const [selectedPreviewUrl, setSelectedPreviewUrl] = useState<string | null>(null)
   const [composerError, setComposerError] = useState<string | null>(null)
   const [isPosting, setIsPosting] = useState(false)
+  const [isAnonymousMode, setIsAnonymousMode] = useState(false)
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [postMenuId, setPostMenuId] = useState<string | null>(null)
   const [confirmDeletePost, setConfirmDeletePost] = useState<FeedPost | null>(null)
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null)
@@ -147,6 +197,7 @@ function FeedPage() {
   const [commentErrorByPost, setCommentErrorByPost] = useState<Record<string, string>>({})
   const [isCommentDeletePendingById, setIsCommentDeletePendingById] = useState<Record<string, boolean>>({})
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = useState<string | null>(null)
+  const [selectedReactionByPost, setSelectedReactionByPost] = useState<Record<string, ReactionEmoji>>({})
   const tapTrackerRef = useRef<Record<string, { timestamp: number; x: number; y: number }>>({})
 
   const hydratePostInteractions = useCallback(async (postIds: string[], currentUserId: string) => {
@@ -203,7 +254,7 @@ function FeedPage() {
 
     const { data: postRows, error: postError } = await supabase
       .from('posts')
-      .select('id, user_id, content, media_url, media_type, created_at')
+      .select('id, user_id, content, media_url, media_type, created_at, post_type, is_anonymous, anonymous_label, category')
       .order('created_at', { ascending: false })
 
     if (postError) {
@@ -261,6 +312,41 @@ function FeedPage() {
     }
   }, [selectedPreviewUrl])
 
+  useEffect(() => {
+    if (!user?.id || typeof window === 'undefined') {
+      setSelectedReactionByPost({})
+      return
+    }
+
+    try {
+      const value = window.localStorage.getItem(reactionStorageKey(user.id))
+      if (!value) {
+        setSelectedReactionByPost({})
+        return
+      }
+
+      const parsed = JSON.parse(value) as Record<string, string>
+      const next: Record<string, ReactionEmoji> = {}
+      for (const [postId, emoji] of Object.entries(parsed)) {
+        if ((REACTION_OPTIONS as readonly string[]).includes(emoji)) {
+          next[postId] = emoji as ReactionEmoji
+        }
+      }
+      setSelectedReactionByPost(next)
+    } catch {
+      setSelectedReactionByPost({})
+    }
+  }, [user?.id])
+
+  useEffect(() => {
+    if (!user?.id || typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(reactionStorageKey(user.id), JSON.stringify(selectedReactionByPost))
+    } catch {
+      // Ignore localStorage quota or access errors.
+    }
+  }, [selectedReactionByPost, user?.id])
+
   const currentDisplayName = useMemo(() => {
     if (profile?.full_name?.trim()) return profile.full_name.trim()
     if (profile?.username?.trim()) return profile.username.trim()
@@ -272,6 +358,8 @@ function FeedPage() {
     if (!activeCommentsPostId) return null
     return posts.find((item) => item.id === activeCommentsPostId) ?? null
   }, [activeCommentsPostId, posts])
+
+  const anonymousLabelPreview = useMemo(() => generateAnonymousLabel(profile), [profile])
 
   const handleFileChange = (file: File | null) => {
     setComposerError(null)
@@ -390,9 +478,9 @@ function FeedPage() {
   }
 
   const likePost = async (postId: string) => {
-    if (!user?.id || isLikePendingByPost[postId]) return
+    if (!user?.id || isLikePendingByPost[postId]) return false
     const currentlyLiked = likedByPost[postId] ?? false
-    if (currentlyLiked) return
+    if (currentlyLiked) return true
 
     const currentCount = likesCountByPost[postId] ?? 0
     const nextCount = currentCount + 1
@@ -413,19 +501,21 @@ function FeedPage() {
         ...prev,
         [postId]: 'Unable to like this post right now. Please try again.',
       }))
+      setIsLikePendingByPost((prev) => ({ ...prev, [postId]: false }))
+      return false
     }
 
     setIsLikePendingByPost((prev) => ({ ...prev, [postId]: false }))
+    return true
   }
 
   const toggleLike = async (postId: string) => {
-    if (!user?.id || isLikePendingByPost[postId]) return
+    if (!user?.id || isLikePendingByPost[postId]) return false
 
     const currentlyLiked = likedByPost[postId] ?? false
 
     if (!currentlyLiked) {
-      await likePost(postId)
-      return
+      return likePost(postId)
     }
 
     const currentCount = likesCountByPost[postId] ?? 0
@@ -447,17 +537,57 @@ function FeedPage() {
           ...prev,
           [postId]: 'Unable to remove your like right now. Please try again.',
         }))
+        setIsLikePendingByPost((prev) => ({ ...prev, [postId]: false }))
+        return false
       }
 
       setIsLikePendingByPost((prev) => ({ ...prev, [postId]: false }))
-      return
+      return true
     }
+
+    return false
   }
 
   const handleDoubleTapLike = async (postId: string) => {
     const currentlyLiked = likedByPost[postId] ?? false
     if (currentlyLiked || isLikePendingByPost[postId]) return
     await likePost(postId)
+  }
+
+  const handleReactionTap = async (postId: string, emoji: ReactionEmoji) => {
+    const currentlyLiked = likedByPost[postId] ?? false
+    if (isLikePendingByPost[postId]) return
+
+    const previousEmoji = selectedReactionByPost[postId]
+
+    if (currentlyLiked && previousEmoji === emoji) {
+      const success = await toggleLike(postId)
+      if (success) {
+        setSelectedReactionByPost((prev) => {
+          const next = { ...prev }
+          delete next[postId]
+          return next
+        })
+      }
+      return
+    }
+
+    setSelectedReactionByPost((prev) => ({ ...prev, [postId]: emoji }))
+
+    if (!currentlyLiked) {
+      const success = await likePost(postId)
+      if (!success) {
+        setSelectedReactionByPost((prev) => {
+          const next = { ...prev }
+          if (previousEmoji) {
+            next[postId] = previousEmoji
+          } else {
+            delete next[postId]
+          }
+          return next
+        })
+      }
+    }
   }
 
   const shouldSkipDoubleTapTarget = (target: EventTarget | null) => {
@@ -541,8 +671,12 @@ function FeedPage() {
         content: trimmedContent ? trimmedContent : null,
         media_url: mediaUrl,
         media_type: mediaType,
+        post_type: isAnonymousMode ? 'confession' : 'normal',
+        is_anonymous: isAnonymousMode,
+        anonymous_label: isAnonymousMode ? anonymousLabelPreview : null,
+        category: isAnonymousMode ? selectedCategory : null,
       })
-      .select('id, user_id, content, media_url, media_type, created_at')
+      .select('id, user_id, content, media_url, media_type, created_at, post_type, is_anonymous, anonymous_label, category')
       .single<PostRow>()
 
     if (insertError || !inserted) {
@@ -566,6 +700,8 @@ function FeedPage() {
     setLikedByPost((prev) => ({ ...prev, [inserted.id]: false }))
     setCommentsCountByPost((prev) => ({ ...prev, [inserted.id]: 0 }))
     setContent('')
+    setIsAnonymousMode(false)
+    setSelectedCategory(null)
     clearSelectedMedia()
     setIsPosting(false)
   }
@@ -804,6 +940,64 @@ function FeedPage() {
               </button>
             </div>
 
+            <div className="anonymous-toggle-block mt-3">
+              <button
+                type="button"
+                className={`anonymous-toggle ${isAnonymousMode ? 'anonymous-toggle-active' : ''}`}
+                onClick={() => {
+                  setIsAnonymousMode((current) => {
+                    const next = !current
+                    if (!next) {
+                      setSelectedCategory(null)
+                    }
+                    return next
+                  })
+                  setComposerError(null)
+                }}
+                disabled={isPosting}
+                aria-pressed={isAnonymousMode}
+              >
+                <span className="anonymous-toggle-copy">
+                  <span className="anonymous-toggle-title">Post anonymously</span>
+                  <span className="anonymous-toggle-subtitle">Hide profile identity in feed</span>
+                </span>
+                <span className={`anonymous-toggle-switch ${isAnonymousMode ? 'anonymous-toggle-switch-on' : ''}`} aria-hidden="true">
+                  <span className="anonymous-toggle-knob" />
+                </span>
+              </button>
+
+              {isAnonymousMode ? (
+                <div className="anonymous-helper animate-fade-up">
+                  <p>Your identity stays hidden. A general label will be shown instead.</p>
+                  <p className="anonymous-helper-note">Posted as: {anonymousLabelPreview}</p>
+                </div>
+              ) : null}
+
+              {isAnonymousMode ? (
+                <div className="confession-category-wrap animate-fade-up">
+                  <p className="confession-category-title">Category (optional)</p>
+                  <div className="confession-category-list">
+                    {CONFESSION_CATEGORIES.map((item) => {
+                      const active = selectedCategory === item
+                      return (
+                        <button
+                          key={item}
+                          type="button"
+                          className={`confession-category-chip ${active ? 'confession-category-chip-active' : ''}`}
+                          onClick={() => setSelectedCategory((current) => (current === item ? null : item))}
+                          disabled={isPosting}
+                          aria-pressed={active}
+                        >
+                          {item}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p className="confession-guideline">Keep it respectful. No harassment, no doxxing.</p>
+                </div>
+              ) : null}
+            </div>
+
             {selectedFile && selectedPreviewUrl ? (
               <div className="media-preview animate-fade-up mt-4">
                 {selectedFile.type.startsWith('image/') ? (
@@ -849,6 +1043,7 @@ function FeedPage() {
           {!isFeedLoading && !feedError && posts.length > 0 ? (
             <div className="space-y-4">
               {posts.map((post, index) => {
+                const anonymousPost = isPostAnonymous(post)
                 const displayName = post.profile?.full_name?.trim() || post.profile?.username?.trim() || 'Community Member'
                 const handle = post.profile?.username?.trim() ? `@${post.profile.username?.trim()}` : null
                 const isOwner = post.user_id === user?.id
@@ -857,26 +1052,35 @@ function FeedPage() {
                 const commentsCount = commentsCountByPost[post.id] ?? 0
                 const isLikePending = isLikePendingByPost[post.id] ?? false
                 const likeAnimationTick = likeAnimationTickByPost[post.id] ?? 0
+                const activeReaction = selectedReactionByPost[post.id] ?? '❤️'
 
                 return (
                   <article
                     key={post.id}
-                    className="soft-card feed-card post-card animate-fade-up p-3.5 sm:p-5"
+                    className={`soft-card feed-card post-card animate-fade-up p-3.5 sm:p-5 ${anonymousPost ? 'post-card-confession' : ''}`}
                     style={{ animationDelay: `${Math.min(index * 40, 240)}ms` }}
                   >
                     <header className="post-card-header">
                       <div className="flex min-w-0 items-center gap-3">
-                        <div className="avatar-ring">
-                          {post.profile?.avatar_url ? (
-                            <img src={post.profile.avatar_url} alt={displayName} className="h-full w-full rounded-full object-cover" />
-                          ) : (
-                            <span>{getInitials(displayName) || 'U'}</span>
-                          )}
-                        </div>
+                        {anonymousPost ? (
+                          <div className="anonymous-avatar" aria-hidden="true">
+                            <AnonymousMaskIcon className="anonymous-avatar-icon" />
+                          </div>
+                        ) : (
+                          <div className="avatar-ring">
+                            {post.profile?.avatar_url ? (
+                              <img src={post.profile.avatar_url} alt={displayName} className="h-full w-full rounded-full object-cover" />
+                            ) : (
+                              <span>{getInitials(displayName) || 'U'}</span>
+                            )}
+                          </div>
+                        )}
                         <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-sky-900">{displayName}</p>
+                          <p className="truncate text-sm font-semibold text-sky-900">{anonymousPost ? 'Anonymous' : displayName}</p>
                           <div className="flex flex-wrap items-center gap-2 text-xs text-sky-600">
-                            {handle ? <span>{handle}</span> : null}
+                            {anonymousPost ? <span className="anonymous-label-pill">{post.anonymous_label || 'LUMS Student'}</span> : null}
+                            {!anonymousPost && handle ? <span>{handle}</span> : null}
+                            {anonymousPost && post.category ? <span className="post-category-chip">{post.category}</span> : null}
                             <span>{formatPostDate(post.created_at)}</span>
                           </div>
                         </div>
@@ -918,7 +1122,7 @@ function FeedPage() {
                         onDoubleClick={(event) => handleSurfaceDoubleClick(event, post.id)}
                         onTouchEnd={(event) => handleSurfaceTouchEnd(event, post.id)}
                       >
-                        {post.content ? <p className="post-card-content">{post.content}</p> : null}
+                        {post.content ? <p className={`post-card-content ${anonymousPost ? 'post-card-content-confession' : ''}`}>{post.content}</p> : null}
 
                         {post.media_type === 'image' && post.media_url ? (
                           <div className="post-media-frame">
@@ -944,27 +1148,58 @@ function FeedPage() {
                     ) : null}
 
                     <footer className="post-card-footer">
+                      {anonymousPost ? (
+                        <div className="confession-reaction-row" data-no-double-like="true">
+                          {REACTION_OPTIONS.map((emoji) => {
+                            const isActive = isLiked && activeReaction === emoji
+
+                            return (
+                              <button
+                                key={`${post.id}-${emoji}`}
+                                type="button"
+                                className={`confession-reaction-button ${isActive ? 'confession-reaction-button-active' : ''}`}
+                                onClick={() => void handleReactionTap(post.id, emoji)}
+                                disabled={isLikePending}
+                                data-no-double-like="true"
+                                aria-pressed={isActive}
+                              >
+                                <span>{emoji}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+
                       <div className="post-action-lane post-action-lane-main">
-                        <button
-                          type="button"
-                          className={`post-action-button post-like-button ${isLiked ? 'post-action-button-active' : ''}`}
-                          onClick={() => void toggleLike(post.id)}
-                          disabled={isLikePending}
-                          data-no-double-like="true"
-                          aria-pressed={isLiked}
-                        >
-                          <span key={`${post.id}-${likeAnimationTick}`} className="post-action-icon-wrap" aria-hidden="true">
-                            <HeartIcon
-                              className={`post-action-icon ${isLiked ? 'post-action-icon-liked' : ''} ${
-                                isLiked && likeAnimationTick > 0 ? 'post-action-icon-liked-animate' : ''
-                              }`}
-                            />
-                          </span>
-                          <span className="post-action-label">
-                            {isLikePending ? (isLiked ? 'Updating...' : 'Saving...') : isLiked ? 'Liked' : 'Like'}
-                          </span>
-                          <span className="post-action-count">{likesCount}</span>
-                        </button>
+                        {!anonymousPost ? (
+                          <button
+                            type="button"
+                            className={`post-action-button post-like-button ${isLiked ? 'post-action-button-active' : ''}`}
+                            onClick={() => void toggleLike(post.id)}
+                            disabled={isLikePending}
+                            data-no-double-like="true"
+                            aria-pressed={isLiked}
+                          >
+                            <span key={`${post.id}-${likeAnimationTick}`} className="post-action-icon-wrap" aria-hidden="true">
+                              <HeartIcon
+                                className={`post-action-icon ${isLiked ? 'post-action-icon-liked' : ''} ${
+                                  isLiked && likeAnimationTick > 0 ? 'post-action-icon-liked-animate' : ''
+                                }`}
+                              />
+                            </span>
+                            <span className="post-action-label">
+                              {isLikePending ? (isLiked ? 'Updating...' : 'Saving...') : isLiked ? 'Liked' : 'Like'}
+                            </span>
+                            <span className="post-action-count">{likesCount}</span>
+                          </button>
+                        ) : (
+                          <div className="post-action-button post-like-summary" data-no-double-like="true">
+                            <span className="post-action-icon-wrap" aria-hidden="true">
+                              <HeartIcon className="post-action-icon" />
+                            </span>
+                            <span className="post-action-label">{likesCount === 1 ? '1 reaction' : `${likesCount} reactions`}</span>
+                          </div>
+                        )}
 
                         <button
                           type="button"
@@ -1038,7 +1273,9 @@ function FeedPage() {
                     Comments
                   </h3>
                   <p className="comments-sheet-subtitle">
-                    {activeCommentsPost.profile?.full_name?.trim() || activeCommentsPost.profile?.username?.trim() || 'Community Member'}
+                    {isPostAnonymous(activeCommentsPost)
+                      ? 'Anonymous'
+                      : activeCommentsPost.profile?.full_name?.trim() || activeCommentsPost.profile?.username?.trim() || 'Community Member'}
                   </p>
                 </div>
                 <button type="button" className="upload-clear" onClick={closeComments}>
