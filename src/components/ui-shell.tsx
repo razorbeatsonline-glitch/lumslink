@@ -114,9 +114,11 @@ export function AuthPageShell({
 export function AppShell({
   title,
   children,
+  mobileImmersive = false,
 }: {
   title: string
   children: React.ReactNode
+  mobileImmersive?: boolean
 }) {
   const { signOut, user } = useAuth()
   const [pendingIncomingCount, setPendingIncomingCount] = useState(0)
@@ -170,9 +172,9 @@ export function AppShell({
   }, [loadPendingIncomingCount])
 
   return (
-    <main className="page-bg min-h-dvh px-2.5 pb-24 pt-2.5 sm:min-h-screen sm:px-6 sm:pb-8 sm:pt-7 lg:px-8">
+    <main className={`page-bg min-h-dvh px-2.5 pb-24 pt-2.5 sm:min-h-screen sm:px-6 sm:pb-8 sm:pt-7 lg:px-8 ${mobileImmersive ? 'app-shell-mobile-immersive' : ''}`}>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 sm:gap-5">
-        <header className="soft-card animate-fade-up app-topbar px-3.5 py-2.5 sm:px-5 sm:py-4">
+        <header className={`soft-card animate-fade-up app-topbar px-3.5 py-2.5 sm:px-5 sm:py-4 ${mobileImmersive ? 'app-shell-mobile-topbar-hidden' : ''}`}>
           <div className="flex min-w-0 items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[0.62rem] font-semibold uppercase tracking-[0.17em] text-sky-600 sm:text-xs">LumsLink</p>
@@ -200,12 +202,14 @@ export function AppShell({
         {children}
       </div>
 
-      <nav className="mobile-bottom-nav sm:hidden" aria-label="Primary">
-        <NavItem to="/feed" label="Feed" icon="feed" />
-        <NavItem to="/messages" label="Messages" icon="messages" />
-        <NavItem to="/requests" label="Requests" icon="requests" badgeCount={pendingIncomingCount} />
-        <NavItem to="/profile" label="Profile" icon="profile" />
-      </nav>
+      {!mobileImmersive ? (
+        <nav className="mobile-bottom-nav sm:hidden" aria-label="Primary">
+          <NavItem to="/feed" label="Feed" icon="feed" />
+          <NavItem to="/messages" label="Messages" icon="messages" />
+          <NavItem to="/requests" label="Requests" icon="requests" badgeCount={pendingIncomingCount} />
+          <NavItem to="/profile" label="Profile" icon="profile" />
+        </nav>
+      ) : null}
     </main>
   )
 }

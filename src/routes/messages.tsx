@@ -938,11 +938,12 @@ function MessagesPage() {
   }
 
   const hasAcceptedFriends = friends.length > 0
+  const isMobileChatOpen = Boolean(activeConversationDisplay)
 
   return (
     <AuthOnly>
-      <AppShell title="Messages">
-        <section className={`soft-card animate-fade-up friend-panel messages-panel p-4 sm:p-6 ${activeConversationDisplay ? 'messages-panel-chat-open' : ''}`}>
+      <AppShell title="Messages" mobileImmersive={isMobileChatOpen}>
+        <section className={`soft-card animate-fade-up friend-panel messages-panel p-4 sm:p-6 ${isMobileChatOpen ? 'messages-panel-chat-open' : ''}`}>
           <div className="messages-intro">
             <p className="friend-kicker">Messages</p>
             <h2 className="mt-2 text-2xl font-bold text-sky-950">Direct messages</h2>
@@ -954,7 +955,7 @@ function MessagesPage() {
             </div>
           </div>
 
-          <div className={`messages-layout mt-4 sm:mt-5 ${activeConversationDisplay ? 'messages-layout-chat-open' : ''}`}>
+          <div className={`messages-layout mt-4 sm:mt-5 ${isMobileChatOpen ? 'messages-layout-chat-open' : ''}`}>
             <div className="message-panel message-list-pane">
               <div className="message-panel-header">
                 <h3 className="message-panel-title">Friends & conversations</h3>
@@ -1013,7 +1014,7 @@ function MessagesPage() {
               </div>
             </div>
 
-            <div className={`message-chat-card message-chat-pane ${activeConversationDisplay ? 'message-chat-pane-active' : ''}`}>
+            <div className={`message-chat-card message-chat-pane ${isMobileChatOpen ? 'message-chat-pane-active' : ''}`}>
               {!hasAcceptedFriends ? (
                 <div className="message-empty-wrap">
                   <p className="message-empty-title">No chat access yet</p>
