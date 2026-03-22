@@ -3,19 +3,18 @@ import products from '../../data/products'
 
 export const Route = createFileRoute('/products/$productId')({
   component: RouteComponent,
-  loader: async ({ params }) => {
-    const product = products.find(
-      (product) => product.id === +params.productId,
-    )
-    if (!product) {
-      throw new Error('Product not found')
-    }
-    return product
-  },
 })
 
 function RouteComponent() {
-  const product = Route.useLoaderData()
+  const { productId } = Route.useParams()
+  const normalizedId = Number(productId)
+  const product = Number.isFinite(normalizedId)
+    ? products.find((item) => item.id === normalizedId)
+    : undefined
+
+  if (!product) {
+    return <ProductNotFound />
+  }
 
   return (
     <div className="flex flex-col md:flex-row gap-8 p-5">
@@ -42,6 +41,18 @@ function RouteComponent() {
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+function ProductNotFound() {
+  return (
+    <div className="mx-auto max-w-2xl p-6">
+      <h1 className="text-2xl font-bold text-sky-950">Product not found</h1>
+      <p className="mt-2 text-sky-700">The link is invalid or this product no longer exists.</p>
+      <Link to="/" className="mt-4 inline-block text-sky-700 underline">
+        Back to home
+      </Link>
     </div>
   )
 }

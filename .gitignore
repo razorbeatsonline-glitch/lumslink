@@ -1,0 +1,13 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+.tanstack
+
+# Local tooling folders
+.netlify
+
+# Environment files
+.env
+.env.*

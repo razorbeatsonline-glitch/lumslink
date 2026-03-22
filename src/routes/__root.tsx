@@ -1,5 +1,7 @@
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 
+import { AuthProvider } from '@/lib/auth-context'
+
 import '../styles.css'
 
 export const Route = createRootRoute({
@@ -13,12 +15,11 @@ export const Route = createRootRoute({
         content: 'width=device-width, initial-scale=1',
       },
       {
-        title: 'LumsLink | Anonymous Social for LUMS',
+        title: 'LumsLink | Social for LUMS',
       },
       {
         name: 'description',
-        content:
-          'LumsLink is an anonymous social platform for LUMS students with posting, comments, likes, and private messaging.',
+        content: 'LumsLink is a social platform for LUMS students with thoughtful onboarding and profile-first identity setup.',
       },
     ],
   }),
@@ -32,7 +33,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body>
-        {children}
+        <AuthProvider>{children}</AuthProvider>
         <Scripts />
       </body>
     </html>
