@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, TouchEvent } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 
 import { AppShell, FullscreenLoader } from '@/components/ui-shell'
 import { useAuth } from '@/lib/auth-context'
+import { createNotification } from '@/lib/notifications'
 import { AuthOnly } from '@/lib/route-guards'
 import { supabase } from '@/lib/supabase'
 
@@ -46,11 +47,22 @@ type CommentRow = {
   user_id: string
   content: string
   created_at: string
+  parent_comment_id: string | null
+  mentions: string[] | null
 }
 
 type FeedComment = CommentRow & {
   profile: ProfilePreview | null
 }
+
+type MentionSuggestion = {
+  id: string
+  username: string | null
+  full_name: string | null
+  avatar_url: string | null
+}
+
+type MentionComposerTarget = { kind: 'comment'; postId: string } | { kind: 'reply'; postId: string; parentCommentId: string }
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime'])
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024
@@ -125,6 +137,62 @@ function reactionStorageKey(userId: string) {
   return `lumslink:post-reaction:${userId}`
 }
 
+function extractMentionCandidates(value: string) {
+  const regex = /(^|\s)@([a-zA-Z0-9_]+)/g
+  const usernames = new Set<string>()
+  let match: RegExpExecArray | null = null
+
+  while ((match = regex.exec(value)) !== null) {
+    const username = match[2]?.trim().toLowerCase()
+    if (username) usernames.add(username)
+  }
+
+  return Array.from(usernames)
+}
+
+function getTrailingMentionQuery(value: string) {
+  const match = value.match(/(^|\s)@([a-zA-Z0-9_]*)$/)
+  if (!match) return null
+  return match[2] ?? ''
+}
+
+function getCommentDisplayName(comment: FeedComment) {
+  return comment.profile?.full_name?.trim() || comment.profile?.username?.trim() || 'Community Member'
+}
+
+function getCommentHandle(comment: FeedComment) {
+  return comment.profile?.username?.trim() ? `@${comment.profile.username?.trim()}` : null
+}
+
+function renderCommentWithMentions(comment: FeedComment) {
+  const mentions = new Set((comment.mentions ?? []).map((item) => item.toLowerCase()))
+  if (mentions.size === 0) {
+    return <>{comment.content}</>
+  }
+
+  const parts = comment.content.split(/(@[a-zA-Z0-9_]+)/g)
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (!part.startsWith('@')) {
+          return <Fragment key={`${comment.id}-text-${index}`}>{part}</Fragment>
+        }
+
+        const username = part.slice(1).toLowerCase()
+        if (!mentions.has(username)) {
+          return <Fragment key={`${comment.id}-mention-${index}`}>{part}</Fragment>
+        }
+
+        return (
+          <span key={`${comment.id}-mention-${index}`} className="comment-mention-pill">
+            {part}
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
 function HeartIcon({ className = '' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className={className}>
@@ -197,6 +265,12 @@ function FeedPage() {
   const [commentErrorByPost, setCommentErrorByPost] = useState<Record<string, string>>({})
   const [isCommentDeletePendingById, setIsCommentDeletePendingById] = useState<Record<string, boolean>>({})
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = useState<string | null>(null)
+  const [activeReplyParentCommentId, setActiveReplyParentCommentId] = useState<string | null>(null)
+  const [replyDraftByCommentId, setReplyDraftByCommentId] = useState<Record<string, string>>({})
+  const [mentionComposerTarget, setMentionComposerTarget] = useState<MentionComposerTarget | null>(null)
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
+  const [mentionSuggestions, setMentionSuggestions] = useState<MentionSuggestion[]>([])
+  const [isMentionSuggestionsLoading, setIsMentionSuggestionsLoading] = useState(false)
   const [selectedReactionByPost, setSelectedReactionByPost] = useState<Record<string, ReactionEmoji>>({})
   const tapTrackerRef = useRef<Record<string, { timestamp: number; x: number; y: number }>>({})
 
@@ -347,6 +421,51 @@ function FeedPage() {
     }
   }, [selectedReactionByPost, user?.id])
 
+  useEffect(() => {
+    if (!mentionComposerTarget || mentionQuery === null) {
+      setMentionSuggestions([])
+      setIsMentionSuggestionsLoading(false)
+      return
+    }
+
+    let cancelled = false
+    const run = async () => {
+      setIsMentionSuggestionsLoading(true)
+
+      let queryBuilder = supabase.from('profiles').select('id, username, full_name, avatar_url')
+      const trimmed = mentionQuery.trim().toLowerCase()
+
+      if (trimmed) {
+        queryBuilder = queryBuilder.ilike('username', `${trimmed}%`)
+      } else {
+        queryBuilder = queryBuilder.not('username', 'is', null)
+      }
+
+      const { data, error } = await queryBuilder.order('username', { ascending: true }).limit(6)
+
+      if (cancelled) return
+
+      if (error) {
+        console.error('Supabase mention suggestions fetch error:', error)
+        setMentionSuggestions([])
+        setIsMentionSuggestionsLoading(false)
+        return
+      }
+
+      setMentionSuggestions((data ?? []) as MentionSuggestion[])
+      setIsMentionSuggestionsLoading(false)
+    }
+
+    const timer = window.setTimeout(() => {
+      void run()
+    }, 120)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [mentionComposerTarget, mentionQuery])
+
   const currentDisplayName = useMemo(() => {
     if (profile?.full_name?.trim()) return profile.full_name.trim()
     if (profile?.username?.trim()) return profile.username.trim()
@@ -411,7 +530,7 @@ function FeedPage() {
 
     const { data: commentRows, error: commentsError } = await supabase
       .from('comments')
-      .select('id, post_id, user_id, content, created_at')
+      .select('id, post_id, user_id, content, created_at, parent_comment_id, mentions')
       .eq('post_id', postId)
       .order('created_at', { ascending: true })
 
@@ -459,6 +578,9 @@ function FeedPage() {
   const openComments = (postId: string) => {
     setActiveCommentsPostId(postId)
     setConfirmDeleteCommentId(null)
+    setActiveReplyParentCommentId(null)
+    setMentionComposerTarget(null)
+    setMentionQuery(null)
 
     if (!commentsByPost[postId]) {
       void loadCommentsForPost(postId)
@@ -468,6 +590,9 @@ function FeedPage() {
   const closeComments = () => {
     setActiveCommentsPostId(null)
     setConfirmDeleteCommentId(null)
+    setActiveReplyParentCommentId(null)
+    setMentionComposerTarget(null)
+    setMentionQuery(null)
   }
 
   const triggerLikeAnimation = (postId: string) => {
@@ -506,6 +631,23 @@ function FeedPage() {
     }
 
     setIsLikePendingByPost((prev) => ({ ...prev, [postId]: false }))
+
+    const postOwnerId = posts.find((item) => item.id === postId)?.user_id ?? null
+    if (postOwnerId && postOwnerId !== user.id) {
+      const actorHandle = profile?.username?.trim() ? `@${profile.username.trim()}` : '@someone'
+      const notificationResult = await createNotification({
+        userId: postOwnerId,
+        actorId: user.id,
+        type: 'post_liked',
+        postId,
+        message: `${actorHandle} liked your post.`,
+        dedupeByContext: true,
+      })
+      if (notificationResult.error) {
+        console.error('Post-liked notification creation failed:', notificationResult.error)
+      }
+    }
+
     return true
   }
 
@@ -706,10 +848,47 @@ function FeedPage() {
     setIsPosting(false)
   }
 
-  const submitComment = async (postId: string) => {
+  const updateMentionLookup = (value: string, target: MentionComposerTarget) => {
+    const query = getTrailingMentionQuery(value)
+
+    if (query === null) {
+      if (mentionComposerTarget) {
+        setMentionComposerTarget(null)
+        setMentionQuery(null)
+      }
+      return
+    }
+
+    setMentionComposerTarget(target)
+    setMentionQuery(query)
+  }
+
+  const applyMentionSuggestion = (username: string) => {
+    if (!mentionComposerTarget) return
+
+    if (mentionComposerTarget.kind === 'comment') {
+      const postId = mentionComposerTarget.postId
+      const current = commentDraftByPost[postId] ?? ''
+      const next = current.replace(/(^|\s)@[a-zA-Z0-9_]*$/, `$1@${username} `)
+      setCommentDraftByPost((prev) => ({ ...prev, [postId]: next }))
+      setMentionComposerTarget({ kind: 'comment', postId })
+      setMentionQuery(null)
+      return
+    }
+
+    const parentCommentId = mentionComposerTarget.parentCommentId
+    const current = replyDraftByCommentId[parentCommentId] ?? ''
+    const next = current.replace(/(^|\s)@[a-zA-Z0-9_]*$/, `$1@${username} `)
+    setReplyDraftByCommentId((prev) => ({ ...prev, [parentCommentId]: next }))
+    setMentionComposerTarget({ kind: 'reply', postId: mentionComposerTarget.postId, parentCommentId })
+    setMentionQuery(null)
+  }
+
+  const submitComment = async (postId: string, options?: { parentCommentId?: string | null }) => {
     if (!user?.id || isCommentPostingByPost[postId]) return
 
-    const draft = commentDraftByPost[postId] ?? ''
+    const parentCommentId = options?.parentCommentId ?? null
+    const draft = parentCommentId ? replyDraftByCommentId[parentCommentId] ?? '' : commentDraftByPost[postId] ?? ''
     const trimmedContent = draft.trim()
 
     if (!trimmedContent) {
@@ -720,14 +899,33 @@ function FeedPage() {
     setCommentErrorByPost((prev) => ({ ...prev, [postId]: '' }))
     setIsCommentPostingByPost((prev) => ({ ...prev, [postId]: true }))
 
+    const mentionCandidates = extractMentionCandidates(trimmedContent)
+    let mentionedProfiles: Array<{ id: string; username: string | null }> = []
+    if (mentionCandidates.length > 0) {
+      const { data: mentionRows, error: mentionError } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .in('username', mentionCandidates)
+
+      if (mentionError) {
+        console.error('Supabase mention lookup error:', mentionError)
+      } else {
+        mentionedProfiles = (mentionRows ?? []) as Array<{ id: string; username: string | null }>
+      }
+    }
+
+    const mentions = Array.from(new Set(mentionedProfiles.map((row) => row.username).filter((item): item is string => !!item)))
+
     const { data: insertedComment, error: insertError } = await supabase
       .from('comments')
       .insert({
         post_id: postId,
         user_id: user.id,
         content: trimmedContent,
+        parent_comment_id: parentCommentId,
+        mentions: mentions.length > 0 ? mentions : null,
       })
-      .select('id, post_id, user_id, content, created_at')
+      .select('id, post_id, user_id, content, created_at, parent_comment_id, mentions')
       .single<CommentRow>()
 
     if (insertError || !insertedComment) {
@@ -767,8 +965,68 @@ function FeedPage() {
       [postId]: (prev[postId] ?? 0) + 1,
     }))
 
-    setCommentDraftByPost((prev) => ({ ...prev, [postId]: '' }))
+    if (parentCommentId) {
+      setReplyDraftByCommentId((prev) => ({ ...prev, [parentCommentId]: '' }))
+      setActiveReplyParentCommentId(null)
+    } else {
+      setCommentDraftByPost((prev) => ({ ...prev, [postId]: '' }))
+    }
+
+    setMentionComposerTarget(null)
+    setMentionQuery(null)
+    setMentionSuggestions([])
     setIsCommentPostingByPost((prev) => ({ ...prev, [postId]: false }))
+
+    const actorHandle = profile?.username?.trim() ? `@${profile.username.trim()}` : '@someone'
+    const postOwnerId = posts.find((item) => item.id === postId)?.user_id ?? null
+
+    if (postOwnerId && postOwnerId !== user.id) {
+      const notificationResult = await createNotification({
+        userId: postOwnerId,
+        actorId: user.id,
+        type: 'post_commented',
+        postId,
+        commentId: insertedComment.id,
+        message: `${actorHandle} commented on your post.`,
+      })
+      if (notificationResult.error) {
+        console.error('Post-commented notification creation failed:', notificationResult.error)
+      }
+    }
+
+    if (parentCommentId) {
+      const parentComment = (commentsByPost[postId] ?? []).find((item) => item.id === parentCommentId) ?? null
+      const parentOwnerId = parentComment?.user_id ?? null
+      if (parentOwnerId && parentOwnerId !== user.id) {
+        const notificationResult = await createNotification({
+          userId: parentOwnerId,
+          actorId: user.id,
+          type: 'comment_replied',
+          postId,
+          commentId: insertedComment.id,
+          message: `${actorHandle} replied to your comment.`,
+        })
+        if (notificationResult.error) {
+          console.error('Comment-replied notification creation failed:', notificationResult.error)
+        }
+      }
+    }
+
+    const mentionedUserIds = Array.from(new Set(mentionedProfiles.map((item) => item.id)))
+    for (const mentionedUserId of mentionedUserIds) {
+      if (!mentionedUserId || mentionedUserId === user.id) continue
+      const notificationResult = await createNotification({
+        userId: mentionedUserId,
+        actorId: user.id,
+        type: 'mentioned_in_comment',
+        postId,
+        commentId: insertedComment.id,
+        message: `${actorHandle} mentioned you in a comment.`,
+      })
+      if (notificationResult.error) {
+        console.error('Mentioned-in-comment notification creation failed:', notificationResult.error)
+      }
+    }
   }
 
   const requestDeletePost = (post: FeedPost) => {
@@ -798,15 +1056,26 @@ function FeedPage() {
       return
     }
 
+    const relatedCommentIds = new Set<string>([commentId])
+    for (const item of commentsByPost[postId] ?? []) {
+      if (item.parent_comment_id === commentId) {
+        relatedCommentIds.add(item.id)
+      }
+    }
+
     setCommentsByPost((prev) => ({
       ...prev,
-      [postId]: (prev[postId] ?? []).filter((item) => item.id !== commentId),
+      [postId]: (prev[postId] ?? []).filter((item) => !relatedCommentIds.has(item.id)),
     }))
 
     setCommentsCountByPost((prev) => ({
       ...prev,
-      [postId]: Math.max(0, (prev[postId] ?? 0) - 1),
+      [postId]: Math.max(0, (prev[postId] ?? 0) - relatedCommentIds.size),
     }))
+
+    if (activeReplyParentCommentId && relatedCommentIds.has(activeReplyParentCommentId)) {
+      setActiveReplyParentCommentId(null)
+    }
 
     setIsCommentDeletePendingById((prev) => ({ ...prev, [commentId]: false }))
     setConfirmDeleteCommentId(null)
@@ -872,6 +1141,25 @@ function FeedPage() {
       console.error('Supabase post-media cleanup error:', storageCleanupError)
     }
   }
+
+  const activePostComments = useMemo(() => {
+    if (!activeCommentsPostId) return []
+    return commentsByPost[activeCommentsPostId] ?? []
+  }, [activeCommentsPostId, commentsByPost])
+
+  const topLevelComments = useMemo(() => activePostComments.filter((comment) => !comment.parent_comment_id), [activePostComments])
+
+  const repliesByParentCommentId = useMemo(() => {
+    const map: Record<string, FeedComment[]> = {}
+    for (const comment of activePostComments) {
+      if (!comment.parent_comment_id) continue
+      if (!map[comment.parent_comment_id]) {
+        map[comment.parent_comment_id] = []
+      }
+      map[comment.parent_comment_id].push(comment)
+    }
+    return map
+  }, [activePostComments])
 
   const canSubmit = (!isPosting && content.trim().length > 0) || (!isPosting && !!selectedFile)
 
@@ -1291,7 +1579,7 @@ function FeedPage() {
                   </div>
                 ) : null}
 
-                {!isCommentsLoadingByPost[activeCommentsPost.id] && (commentsByPost[activeCommentsPost.id] ?? []).length === 0 ? (
+                {!isCommentsLoadingByPost[activeCommentsPost.id] && topLevelComments.length === 0 ? (
                   <div className="comments-empty-state">
                     <p className="text-sm font-semibold text-sky-900">No comments yet</p>
                     <p className="mt-1 text-xs text-sky-600">Start the conversation with the first comment.</p>
@@ -1299,36 +1587,60 @@ function FeedPage() {
                 ) : null}
 
                 {!isCommentsLoadingByPost[activeCommentsPost.id]
-                  ? (commentsByPost[activeCommentsPost.id] ?? []).map((comment) => {
-                      const commentName =
-                        comment.profile?.full_name?.trim() || comment.profile?.username?.trim() || 'Community Member'
-                      const commentHandle = comment.profile?.username?.trim() ? `@${comment.profile.username?.trim()}` : null
+                  ? topLevelComments.map((comment) => {
+                      const commentName = getCommentDisplayName(comment)
+                      const commentHandle = getCommentHandle(comment)
                       const isCommentOwner = comment.user_id === user?.id
                       const isDeletingComment = isCommentDeletePendingById[comment.id] ?? false
                       const isConfirmingDelete = confirmDeleteCommentId === comment.id
+                      const isReplyComposerOpen = activeReplyParentCommentId === comment.id
+                      const replies = repliesByParentCommentId[comment.id] ?? []
+                      const replyDraft = replyDraftByCommentId[comment.id] ?? ''
+                      const showReplyMentionSuggestions =
+                        mentionComposerTarget?.kind === 'reply' &&
+                        mentionComposerTarget.postId === activeCommentsPost.id &&
+                        mentionComposerTarget.parentCommentId === comment.id &&
+                        mentionQuery !== null
 
                       return (
-                        <article key={comment.id} className="comment-card animate-fade-up">
-                          <div className="flex items-start gap-3">
-                            <div className="avatar-ring comment-avatar-ring">
-                              {comment.profile?.avatar_url ? (
-                                <img src={comment.profile.avatar_url} alt={commentName} className="h-full w-full rounded-full object-cover" />
-                              ) : (
-                                <span>{getInitials(commentName) || 'U'}</span>
-                              )}
-                            </div>
-
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="truncate text-xs font-bold text-sky-900">{commentName}</p>
-                                {commentHandle ? <span className="text-xs text-sky-600">{commentHandle}</span> : null}
-                                <span className="text-xs text-sky-500">{formatPostDate(comment.created_at)}</span>
+                        <article key={comment.id} className="comment-thread animate-fade-up">
+                          <div className="comment-card">
+                            <div className="flex items-start gap-3">
+                              <div className="avatar-ring comment-avatar-ring">
+                                {comment.profile?.avatar_url ? (
+                                  <img src={comment.profile.avatar_url} alt={commentName} className="h-full w-full rounded-full object-cover" />
+                                ) : (
+                                  <span>{getInitials(commentName) || 'U'}</span>
+                                )}
                               </div>
-                              <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-sky-800">{comment.content}</p>
 
-                              {isCommentOwner ? (
-                                <div className="mt-2 flex items-center gap-2">
-                                  {!isConfirmingDelete ? (
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="truncate text-xs font-bold text-sky-900">{commentName}</p>
+                                  {commentHandle ? <span className="text-xs text-sky-600">{commentHandle}</span> : null}
+                                  <span className="text-xs text-sky-500">{formatPostDate(comment.created_at)}</span>
+                                </div>
+                                <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-sky-800">{renderCommentWithMentions(comment)}</p>
+
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <button
+                                    type="button"
+                                    className="comment-reply-button"
+                                    onClick={() => {
+                                      setActiveReplyParentCommentId((current) => (current === comment.id ? null : comment.id))
+                                      setConfirmDeleteCommentId(null)
+                                      setReplyDraftByCommentId((prev) => {
+                                        if (prev[comment.id]) return prev
+                                        const seed = comment.profile?.username?.trim() ? `@${comment.profile.username.trim()} ` : ''
+                                        return { ...prev, [comment.id]: seed }
+                                      })
+                                    }}
+                                    disabled={isCommentPostingByPost[activeCommentsPost.id] ?? false}
+                                  >
+                                    Reply
+                                  </button>
+
+                                  {isCommentOwner && !isConfirmingDelete ? (
                                     <button
                                       type="button"
                                       className="comment-delete-button"
@@ -1337,7 +1649,9 @@ function FeedPage() {
                                     >
                                       Delete
                                     </button>
-                                  ) : (
+                                  ) : null}
+
+                                  {isCommentOwner && isConfirmingDelete ? (
                                     <>
                                       <button
                                         type="button"
@@ -1356,11 +1670,147 @@ function FeedPage() {
                                         Cancel
                                       </button>
                                     </>
-                                  )}
+                                  ) : null}
                                 </div>
-                              ) : null}
+                              </div>
                             </div>
                           </div>
+
+                          {isReplyComposerOpen ? (
+                            <div className="comment-reply-composer-wrap">
+                              <label htmlFor={`reply-input-${comment.id}`} className="sr-only">
+                                Write a reply
+                              </label>
+                              <textarea
+                                id={`reply-input-${comment.id}`}
+                                rows={2}
+                                className="composer-textarea comment-textarea comment-reply-textarea"
+                                placeholder="Write a reply..."
+                                value={replyDraft}
+                                onChange={(event) => {
+                                  const value = event.target.value
+                                  setReplyDraftByCommentId((prev) => ({ ...prev, [comment.id]: value }))
+                                  updateMentionLookup(value, { kind: 'reply', postId: activeCommentsPost.id, parentCommentId: comment.id })
+                                }}
+                                disabled={isCommentPostingByPost[activeCommentsPost.id] ?? false}
+                              />
+
+                              {showReplyMentionSuggestions ? (
+                                <div className="mention-suggestions">
+                                  {isMentionSuggestionsLoading ? <p className="mention-suggestions-empty">Searching...</p> : null}
+                                  {!isMentionSuggestionsLoading && mentionSuggestions.length === 0 ? (
+                                    <p className="mention-suggestions-empty">No matching usernames.</p>
+                                  ) : null}
+                                  {!isMentionSuggestionsLoading
+                                    ? mentionSuggestions.map((item) => (
+                                        <button
+                                          key={`reply-mention-${comment.id}-${item.id}`}
+                                          type="button"
+                                          className="mention-suggestion-item"
+                                          onClick={() => applyMentionSuggestion(item.username ?? '')}
+                                          disabled={!item.username}
+                                        >
+                                          <span className="mention-suggestion-title">{item.username ? `@${item.username}` : '@unknown'}</span>
+                                          {item.full_name?.trim() ? <span className="mention-suggestion-subtitle">{item.full_name.trim()}</span> : null}
+                                        </button>
+                                      ))
+                                    : null}
+                                </div>
+                              ) : null}
+
+                              <div className="mt-2 flex justify-end gap-2">
+                                <button
+                                  type="button"
+                                  className="comment-delete-button"
+                                  onClick={() => {
+                                    setActiveReplyParentCommentId(null)
+                                    setMentionComposerTarget(null)
+                                    setMentionQuery(null)
+                                  }}
+                                  disabled={isCommentPostingByPost[activeCommentsPost.id] ?? false}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  className="post-submit"
+                                  onClick={() => void submitComment(activeCommentsPost.id, { parentCommentId: comment.id })}
+                                  disabled={isCommentPostingByPost[activeCommentsPost.id] ?? false}
+                                >
+                                  {isCommentPostingByPost[activeCommentsPost.id] ? 'Posting...' : 'Post reply'}
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {replies.length > 0 ? (
+                            <div className="comment-replies-wrap">
+                              {replies.map((reply) => {
+                                const replyName = getCommentDisplayName(reply)
+                                const replyHandle = getCommentHandle(reply)
+                                const isReplyOwner = reply.user_id === user?.id
+                                const isDeletingReply = isCommentDeletePendingById[reply.id] ?? false
+                                const isConfirmingReplyDelete = confirmDeleteCommentId === reply.id
+
+                                return (
+                                  <article key={reply.id} className="comment-card comment-reply-card">
+                                    <div className="flex items-start gap-3">
+                                      <div className="avatar-ring comment-avatar-ring comment-avatar-ring-small">
+                                        {reply.profile?.avatar_url ? (
+                                          <img src={reply.profile.avatar_url} alt={replyName} className="h-full w-full rounded-full object-cover" />
+                                        ) : (
+                                          <span>{getInitials(replyName) || 'U'}</span>
+                                        )}
+                                      </div>
+
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <p className="truncate text-xs font-bold text-sky-900">{replyName}</p>
+                                          {replyHandle ? <span className="text-xs text-sky-600">{replyHandle}</span> : null}
+                                          <span className="text-xs text-sky-500">{formatPostDate(reply.created_at)}</span>
+                                        </div>
+                                        <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-sky-800">{renderCommentWithMentions(reply)}</p>
+
+                                        {isReplyOwner ? (
+                                          <div className="mt-2 flex items-center gap-2">
+                                            {!isConfirmingReplyDelete ? (
+                                              <button
+                                                type="button"
+                                                className="comment-delete-button"
+                                                onClick={() => setConfirmDeleteCommentId(reply.id)}
+                                                disabled={isDeletingReply}
+                                              >
+                                                Delete
+                                              </button>
+                                            ) : (
+                                              <>
+                                                <button
+                                                  type="button"
+                                                  className="comment-delete-button comment-delete-button-danger"
+                                                  onClick={() => void deleteComment(activeCommentsPost.id, reply.id)}
+                                                  disabled={isDeletingReply}
+                                                >
+                                                  {isDeletingReply ? 'Deleting...' : 'Confirm delete'}
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="comment-delete-button"
+                                                  onClick={() => setConfirmDeleteCommentId(null)}
+                                                  disabled={isDeletingReply}
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </>
+                                            )}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                  </article>
+                                )
+                              })}
+                            </div>
+                          ) : null}
                         </article>
                       )
                     })
@@ -1381,17 +1831,42 @@ function FeedPage() {
                   className="composer-textarea comment-textarea"
                   placeholder="Write a thoughtful comment..."
                   value={commentDraftByPost[activeCommentsPost.id] ?? ''}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const value = event.target.value
                     setCommentDraftByPost((prev) => ({
                       ...prev,
-                      [activeCommentsPost.id]: event.target.value,
+                      [activeCommentsPost.id]: value,
                     }))
-                  }
+                    updateMentionLookup(value, { kind: 'comment', postId: activeCommentsPost.id })
+                  }}
                   disabled={isCommentPostingByPost[activeCommentsPost.id] ?? false}
                 />
 
+                {mentionComposerTarget?.kind === 'comment' && mentionComposerTarget.postId === activeCommentsPost.id && mentionQuery !== null ? (
+                  <div className="mention-suggestions">
+                    {isMentionSuggestionsLoading ? <p className="mention-suggestions-empty">Searching...</p> : null}
+                    {!isMentionSuggestionsLoading && mentionSuggestions.length === 0 ? (
+                      <p className="mention-suggestions-empty">No matching usernames.</p>
+                    ) : null}
+                    {!isMentionSuggestionsLoading
+                      ? mentionSuggestions.map((item) => (
+                          <button
+                            key={`comment-mention-${item.id}`}
+                            type="button"
+                            className="mention-suggestion-item"
+                            onClick={() => applyMentionSuggestion(item.username ?? '')}
+                            disabled={!item.username}
+                          >
+                            <span className="mention-suggestion-title">{item.username ? `@${item.username}` : '@unknown'}</span>
+                            {item.full_name?.trim() ? <span className="mention-suggestion-subtitle">{item.full_name.trim()}</span> : null}
+                          </button>
+                        ))
+                      : null}
+                  </div>
+                ) : null}
+
                 <div className="mt-3 flex items-center justify-between gap-2">
-                  <p className="text-xs text-sky-600">Comments are visible to everyone who can view this post.</p>
+                  <p className="text-xs text-sky-600">Type @username to mention someone. Comments are visible to everyone.</p>
                   <button
                     type="button"
                     className="post-submit"

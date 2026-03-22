@@ -126,7 +126,6 @@ export function ProfileCard() {
         <InfoRow label="Full name" value={profile?.full_name} />
         <InfoRow label="Class year" value={profile?.class_year} />
         <InfoRow label="Email" value={profile?.email ?? user?.email ?? null} />
-        <InfoRow label="Onboarding" value={profile?.onboarding_completed ? 'Completed' : 'Not completed'} />
       </dl>
 
       <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-4">

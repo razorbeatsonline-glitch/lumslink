@@ -3,6 +3,7 @@ import { Link, createFileRoute } from '@tanstack/react-router'
 
 import { AppShell, FullscreenLoader } from '@/components/ui-shell'
 import { useAuth } from '@/lib/auth-context'
+import { createNotification } from '@/lib/notifications'
 import { AuthOnly } from '@/lib/route-guards'
 import { supabase } from '@/lib/supabase'
 
@@ -49,7 +50,7 @@ function getInitials(profile: ProfilePreview | null) {
 }
 
 function AddFriendsPage() {
-  const { status, user } = useAuth()
+  const { status, user, profile } = useAuth()
 
   const [usernameInput, setUsernameInput] = useState('')
   const [isSearching, setIsSearching] = useState(false)
@@ -158,11 +159,15 @@ function AddFriendsPage() {
     setSearchActionError(null)
     setRelationshipState({ kind: 'outgoing' })
 
-    const { error } = await supabase.from('friend_requests').insert({
-      sender_id: user.id,
-      receiver_id: searchedProfile.id,
-      status: 'pending',
-    })
+    const { data: insertedRequest, error } = await supabase
+      .from('friend_requests')
+      .insert({
+        sender_id: user.id,
+        receiver_id: searchedProfile.id,
+        status: 'pending',
+      })
+      .select('id')
+      .single<{ id: string }>()
 
     if (error) {
       console.error('Supabase friend request insert error:', error)
@@ -173,6 +178,19 @@ function AddFriendsPage() {
       )
       setIsSendPending(false)
       return
+    }
+
+    const actorHandle = profile?.username?.trim() ? `@${profile.username.trim()}` : '@someone'
+    const notificationResult = await createNotification({
+      userId: searchedProfile.id,
+      actorId: user.id,
+      type: 'friend_request_received',
+      friendRequestId: insertedRequest?.id ?? null,
+      message: `${actorHandle} sent you a friend request.`,
+      dedupeByContext: true,
+    })
+    if (notificationResult.error) {
+      console.error('Friend-request notification creation failed:', notificationResult.error)
     }
 
     setIsSendPending(false)

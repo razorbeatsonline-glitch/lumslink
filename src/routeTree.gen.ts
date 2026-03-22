@@ -14,6 +14,7 @@ import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as MessagesRouteImport } from './routes/messages'
 import { Route as RequestsRouteImport } from './routes/requests'
 import { Route as FeedRouteImport } from './routes/feed'
@@ -43,6 +44,11 @@ const ProfileRoute = ProfileRouteImport.update({
 const OnboardingRoute = OnboardingRouteImport.update({
   id: '/onboarding',
   path: '/onboarding',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MessagesRoute = MessagesRouteImport.update({
@@ -76,6 +82,7 @@ export interface FileRoutesByFullPath {
   '/add-friends': typeof AddFriendsRoute
   '/feed': typeof FeedRoute
   '/messages': typeof MessagesRoute
+  '/notifications': typeof NotificationsRoute
   '/onboarding': typeof OnboardingRoute
   '/profile': typeof ProfileRoute
   '/requests': typeof RequestsRoute
@@ -88,6 +95,7 @@ export interface FileRoutesByTo {
   '/add-friends': typeof AddFriendsRoute
   '/feed': typeof FeedRoute
   '/messages': typeof MessagesRoute
+  '/notifications': typeof NotificationsRoute
   '/onboarding': typeof OnboardingRoute
   '/profile': typeof ProfileRoute
   '/requests': typeof RequestsRoute
@@ -101,6 +109,7 @@ export interface FileRoutesById {
   '/add-friends': typeof AddFriendsRoute
   '/feed': typeof FeedRoute
   '/messages': typeof MessagesRoute
+  '/notifications': typeof NotificationsRoute
   '/onboarding': typeof OnboardingRoute
   '/profile': typeof ProfileRoute
   '/requests': typeof RequestsRoute
@@ -115,6 +124,7 @@ export interface FileRouteTypes {
     | '/add-friends'
     | '/feed'
     | '/messages'
+    | '/notifications'
     | '/onboarding'
     | '/profile'
     | '/requests'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/add-friends'
     | '/feed'
     | '/messages'
+    | '/notifications'
     | '/onboarding'
     | '/profile'
     | '/requests'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/add-friends'
     | '/feed'
     | '/messages'
+    | '/notifications'
     | '/onboarding'
     | '/profile'
     | '/requests'
@@ -152,6 +164,7 @@ export interface RootRouteChildren {
   AddFriendsRoute: typeof AddFriendsRoute
   FeedRoute: typeof FeedRoute
   MessagesRoute: typeof MessagesRoute
+  NotificationsRoute: typeof NotificationsRoute
   OnboardingRoute: typeof OnboardingRoute
   ProfileRoute: typeof ProfileRoute
   RequestsRoute: typeof RequestsRoute
@@ -197,6 +210,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RequestsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/onboarding': {
       id: '/onboarding'
       path: '/onboarding'
@@ -240,6 +260,7 @@ const rootRouteChildren: RootRouteChildren = {
   AddFriendsRoute: AddFriendsRoute,
   FeedRoute: FeedRoute,
   MessagesRoute: MessagesRoute,
+  NotificationsRoute: NotificationsRoute,
   OnboardingRoute: OnboardingRoute,
   ProfileRoute: ProfileRoute,
   RequestsRoute: RequestsRoute,
