@@ -4,7 +4,7 @@ import { Link, useRouterState } from '@tanstack/react-router'
 import { useAuth } from '@/lib/auth-context'
 import { supabase } from '@/lib/supabase'
 
-type NavIconName = 'feed' | 'messages' | 'requests' | 'profile'
+type NavIconName = 'feed' | 'messages' | 'requests' | 'notifications' | 'profile'
 
 function NavIcon({ name, active }: { name: NavIconName; active: boolean }) {
   const stroke = active ? '#0f5f95' : '#4c7fa6'
@@ -35,6 +35,21 @@ function NavIcon({ name, active }: { name: NavIconName; active: boolean }) {
     )
   }
 
+  if (name === 'notifications') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" className="mobile-nav-icon" style={{ color: stroke }}>
+        <path
+          d="M12 3.3c-2.9 0-5.2 2.35-5.2 5.24v2.38c0 1.15-.42 2.26-1.2 3.13l-.88 1.02c-.36.42-.06 1.08.5 1.08h13.6c.56 0 .86-.66.5-1.08l-.88-1.02a4.73 4.73 0 0 1-1.2-3.13V8.54c0-2.9-2.32-5.24-5.24-5.24Z"
+          fill={fill}
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinejoin="round"
+        />
+        <path d="M9.2 18.3c.46 1.38 1.42 2.05 2.8 2.05 1.38 0 2.34-.67 2.8-2.05" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      </svg>
+    )
+  }
+
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className="mobile-nav-icon" style={{ color: stroke }}>
       <circle cx="12" cy="8.4" r="3.8" fill={fill} stroke="currentColor" strokeWidth="1.7" />
@@ -49,7 +64,7 @@ function NavItem({
   icon,
   badgeCount = 0,
 }: {
-  to: '/feed' | '/messages' | '/requests' | '/profile'
+  to: '/feed' | '/messages' | '/requests' | '/notifications' | '/profile'
   label: string
   icon: NavIconName
   badgeCount?: number
@@ -62,6 +77,8 @@ function NavItem({
       ? pathname === '/messages'
       : to === '/requests'
         ? pathname === '/requests' || pathname === '/add-friends'
+        : to === '/notifications'
+          ? pathname === '/notifications'
         : pathname === to
 
   return (
@@ -122,6 +139,7 @@ export function AppShell({
 }) {
   const { signOut, user } = useAuth()
   const [pendingIncomingCount, setPendingIncomingCount] = useState(0)
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0)
 
   const loadPendingIncomingCount = useCallback(async () => {
     if (!user?.id) {
@@ -143,22 +161,43 @@ export function AppShell({
     setPendingIncomingCount(count ?? 0)
   }, [user?.id])
 
-  useEffect(() => {
+  const loadUnreadNotificationsCount = useCallback(async () => {
     if (!user?.id) {
-      setPendingIncomingCount(0)
+      setUnreadNotificationsCount(0)
       return
     }
 
-    void loadPendingIncomingCount()
+    const { count, error } = await supabase
+      .from('notifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .eq('is_read', false)
+
+    if (error) {
+      console.error('Supabase unread notification count fetch error:', error)
+      return
+    }
+
+    setUnreadNotificationsCount(count ?? 0)
+  }, [user?.id])
+
+  useEffect(() => {
+    if (!user?.id) {
+      setPendingIncomingCount(0)
+      setUnreadNotificationsCount(0)
+      return
+    }
+
+    void Promise.all([loadPendingIncomingCount(), loadUnreadNotificationsCount()])
 
     const interval = window.setInterval(() => {
-      void loadPendingIncomingCount()
+      void Promise.all([loadPendingIncomingCount(), loadUnreadNotificationsCount()])
     }, 25000)
 
     return () => {
       window.clearInterval(interval)
     }
-  }, [loadPendingIncomingCount, user?.id])
+  }, [loadPendingIncomingCount, loadUnreadNotificationsCount, user?.id])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -170,6 +209,17 @@ export function AppShell({
       window.removeEventListener('lumslink:friend-requests-updated', refreshBadge)
     }
   }, [loadPendingIncomingCount])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const refreshBadge = () => {
+      void loadUnreadNotificationsCount()
+    }
+    window.addEventListener('lumslink:notifications-updated', refreshBadge)
+    return () => {
+      window.removeEventListener('lumslink:notifications-updated', refreshBadge)
+    }
+  }, [loadUnreadNotificationsCount])
 
   return (
     <main className={`page-bg min-h-dvh px-2.5 pb-24 pt-2.5 sm:min-h-screen sm:px-6 sm:pb-8 sm:pt-7 lg:px-8 ${mobileImmersive ? 'app-shell-mobile-immersive' : ''}`}>
@@ -195,6 +245,7 @@ export function AppShell({
             <NavItem to="/feed" label="Feed" icon="feed" />
             <NavItem to="/messages" label="Messages" icon="messages" />
             <NavItem to="/requests" label="Requests" icon="requests" badgeCount={pendingIncomingCount} />
+            <NavItem to="/notifications" label="Alerts" icon="notifications" badgeCount={unreadNotificationsCount} />
             <NavItem to="/profile" label="Profile" icon="profile" />
           </nav>
         </header>
@@ -207,6 +258,7 @@ export function AppShell({
           <NavItem to="/feed" label="Feed" icon="feed" />
           <NavItem to="/messages" label="Messages" icon="messages" />
           <NavItem to="/requests" label="Requests" icon="requests" badgeCount={pendingIncomingCount} />
+          <NavItem to="/notifications" label="Alerts" icon="notifications" badgeCount={unreadNotificationsCount} />
           <NavItem to="/profile" label="Profile" icon="profile" />
         </nav>
       ) : null}
