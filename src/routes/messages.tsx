@@ -198,6 +198,7 @@ function MessagesPage() {
   const previousConversationIdRef = useRef<string | null>(null)
   const previousMessageCountRef = useRef(0)
   const activeConversationIdRef = useRef<string | null>(null)
+  const pendingConversationByFriendRef = useRef<Map<string, Promise<ConversationRow>>>(new Map())
 
   const activeConversationDisplay = useMemo(() => {
     if (!activeConversation) return null
@@ -521,73 +522,126 @@ function MessagesPage() {
         throw new Error('Not authenticated.')
       }
 
-      const { data: currentUserMembershipRows, error: currentUserMembershipError } = await supabase
-        .from('conversation_members')
-        .select('conversation_id')
-        .eq('user_id', user.id)
-
-      if (currentUserMembershipError) {
-        console.error('Supabase error while fetching current user memberships:', currentUserMembershipError)
-        throw new Error('Unable to fetch current user conversations.')
+      const existingPending = pendingConversationByFriendRef.current.get(friendId)
+      if (existingPending) {
+        return existingPending
       }
 
-      const { data: selectedFriendMembershipRows, error: selectedFriendMembershipError } = await supabase
-        .from('conversation_members')
-        .select('conversation_id')
-        .eq('user_id', friendId)
+      const run = async () => {
+        const findExistingDirectConversation = async (): Promise<ConversationRow | null> => {
+          const { data: currentUserMembershipRows, error: currentUserMembershipError } = await supabase
+            .from('conversation_members')
+            .select('conversation_id')
+            .eq('user_id', user.id)
 
-      if (selectedFriendMembershipError) {
-        console.error('Supabase error while fetching selected friend memberships:', selectedFriendMembershipError)
-        throw new Error('Unable to fetch selected friend conversations.')
-      }
+          if (currentUserMembershipError) {
+            console.error('Supabase error while fetching current user memberships:', currentUserMembershipError)
+            throw new Error('Unable to fetch current user conversations.')
+          }
 
-      const currentConversationIds = (currentUserMembershipRows ?? []).map((row) => row.conversation_id)
-      const selectedFriendConversationIds = (selectedFriendMembershipRows ?? []).map((row) => row.conversation_id)
-      const currentConversationIdSet = new Set(currentConversationIds)
-      const intersectionConversationIds = selectedFriendConversationIds.filter((conversationId) => currentConversationIdSet.has(conversationId))
-      const intersectionConversationId = intersectionConversationIds[0] ?? null
+          const currentConversationIds = Array.from(new Set((currentUserMembershipRows ?? []).map((row) => row.conversation_id)))
+          if (currentConversationIds.length === 0) {
+            return null
+          }
 
-      if (intersectionConversationId) {
-        const { data: existingConversation, error: existingConversationError } = await supabase
-          .from('conversations')
-          .select('id, created_at')
-          .eq('id', intersectionConversationId)
-          .maybeSingle<ConversationRow>()
+          const { data: friendMembershipRows, error: friendMembershipError } = await supabase
+            .from('conversation_members')
+            .select('conversation_id')
+            .eq('user_id', friendId)
+            .in('conversation_id', currentConversationIds)
 
-        if (existingConversationError) {
-          console.error('Supabase existing conversation fetch error:', existingConversationError)
+          if (friendMembershipError) {
+            console.error('Supabase error while fetching selected friend memberships:', friendMembershipError)
+            throw new Error('Unable to fetch selected friend conversations.')
+          }
+
+          const sharedConversationIds = Array.from(new Set((friendMembershipRows ?? []).map((row) => row.conversation_id)))
+          if (sharedConversationIds.length === 0) {
+            return null
+          }
+
+          const { data: sharedMemberRows, error: sharedMemberError } = await supabase
+            .from('conversation_members')
+            .select('conversation_id, user_id')
+            .in('conversation_id', sharedConversationIds)
+
+          if (sharedMemberError) {
+            console.error('Supabase error while validating shared conversation members:', sharedMemberError)
+            throw new Error('Unable to validate existing conversation members.')
+          }
+
+          const membersByConversation = new Map<string, Set<string>>()
+          for (const row of (sharedMemberRows ?? []) as ConversationMemberRow[]) {
+            const existingMembers = membersByConversation.get(row.conversation_id)
+            if (existingMembers) existingMembers.add(row.user_id)
+            else membersByConversation.set(row.conversation_id, new Set([row.user_id]))
+          }
+
+          const directConversationIds = Array.from(membersByConversation.entries())
+            .filter(([, members]) => members.size === 2 && members.has(user.id) && members.has(friendId))
+            .map(([conversationId]) => conversationId)
+
+          if (directConversationIds.length === 0) {
+            return null
+          }
+
+          const { data: directConversations, error: directConversationsError } = await supabase
+            .from('conversations')
+            .select('id, created_at')
+            .in('id', directConversationIds)
+            .order('created_at', { ascending: false })
+
+          if (directConversationsError) {
+            console.error('Supabase existing conversation fetch error:', directConversationsError)
+            throw new Error('Unable to fetch existing direct conversation.')
+          }
+
+          const convo = ((directConversations ?? [])[0] as ConversationRow | undefined) ?? null
+          if (convo) {
+            console.log('FOUND CONVO:', convo)
+          }
+          return convo
         }
 
-        return (
-          existingConversation ?? {
-            id: intersectionConversationId,
-            created_at: '',
+        const existingConversation = await findExistingDirectConversation()
+        if (existingConversation) {
+          return existingConversation
+        }
+
+        const { data: insertedConversation, error: conversationInsertError } = await supabase
+          .from('conversations')
+          .insert([{}])
+          .select('id, created_at')
+          .single<ConversationRow>()
+
+        if (conversationInsertError || !insertedConversation) {
+          console.error('Supabase error while inserting conversation:', conversationInsertError)
+          throw new Error('Unable to create conversation right now.')
+        }
+
+        const { error: memberInsertError } = await supabase.from('conversation_members').insert([
+          { conversation_id: insertedConversation.id, user_id: user.id },
+          { conversation_id: insertedConversation.id, user_id: friendId },
+        ])
+
+        if (memberInsertError) {
+          console.error('Supabase error while inserting conversation memberships:', memberInsertError)
+          const fallbackConversation = await findExistingDirectConversation()
+          if (fallbackConversation) {
+            return fallbackConversation
           }
-        )
+          throw new Error('Unable to create conversation members right now.')
+        }
+
+        console.log('CREATED CONVO:', insertedConversation)
+        return insertedConversation
       }
 
-      const { data: insertedConversation, error: conversationInsertError } = await supabase
-        .from('conversations')
-        .insert([{}])
-        .select('id, created_at')
-        .single<ConversationRow>()
-
-      if (conversationInsertError || !insertedConversation) {
-        console.error('Supabase error while inserting conversation:', conversationInsertError)
-        throw new Error('Unable to create conversation right now.')
-      }
-
-      const { error: memberInsertError } = await supabase.from('conversation_members').insert([
-        { conversation_id: insertedConversation.id, user_id: user.id },
-        { conversation_id: insertedConversation.id, user_id: friendId },
-      ])
-
-      if (memberInsertError) {
-        console.error('Supabase error while inserting conversation memberships:', memberInsertError)
-        throw new Error('Unable to create conversation members right now.')
-      }
-
-      return insertedConversation
+      const pending = run().finally(() => {
+        pendingConversationByFriendRef.current.delete(friendId)
+      })
+      pendingConversationByFriendRef.current.set(friendId, pending)
+      return pending
     },
     [user?.id],
   )
@@ -595,6 +649,7 @@ function MessagesPage() {
   const handleOpenConversation = useCallback(
     async (contact: ConversationContactItem) => {
       if (!user?.id) return
+      console.log('OPENING CONVO WITH:', contact.friendId)
       setResolvingFriendId(contact.friendId)
       setActiveConversationError(null)
       setSendMessageError(null)
