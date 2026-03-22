@@ -50,6 +50,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let isMounted = true
 
+    async function syncAuthState(nextSession: Session | null, { setLoading }: { setLoading: boolean }) {
+      if (!isMounted) return
+
+      setSession(nextSession)
+      const nextUser = nextSession?.user ?? null
+      setUser(nextUser)
+
+      if (!nextUser) {
+        setProfile(null)
+        setError(null)
+        setStatus('unauthenticated')
+        return
+      }
+
+      if (setLoading) {
+        setStatus('loading')
+      }
+
+      try {
+        const profileResult = await fetchUserProfile(nextUser)
+        if (!isMounted) return
+
+        setProfile(profileResult.profile)
+        setError(profileResult.error)
+      } catch (err: unknown) {
+        if (!isMounted) return
+        setProfile(null)
+        setError(err instanceof Error ? err.message : 'Failed to load your profile.')
+      }
+
+      if (!isMounted) return
+      setStatus('authenticated')
+    }
+
     async function initialize() {
       const { data, error: sessionError } = await supabase.auth.getSession()
 
@@ -59,24 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setError(sessionError.message)
       }
 
-      const nextSession = data.session
-      const nextUser = nextSession?.user ?? null
-
-      setSession(nextSession)
-      setUser(nextUser)
-
-      if (!nextUser) {
-        setProfile(null)
-        setStatus('unauthenticated')
-        return
-      }
-
-      const profileResult = await fetchUserProfile(nextUser)
-      if (!isMounted) return
-
-      setProfile(profileResult.profile)
-      setError(profileResult.error)
-      setStatus('authenticated')
+      await syncAuthState(data.session, { setLoading: false })
     }
 
     initialize().catch((err: unknown) => {
@@ -87,26 +104,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
-      if (!isMounted) return
-
-      setSession(nextSession)
-      const nextUser = nextSession?.user ?? null
-      setUser(nextUser)
-
-      if (!nextUser) {
-        setProfile(null)
-        setStatus('unauthenticated')
-        return
-      }
-
-      setStatus('loading')
-      const profileResult = await fetchUserProfile(nextUser)
-      if (!isMounted) return
-
-      setProfile(profileResult.profile)
-      setError(profileResult.error)
-      setStatus('authenticated')
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      // Avoid awaiting Supabase queries directly inside auth state callbacks.
+      // Supabase can dead-lock when additional client calls are awaited here.
+      setTimeout(() => {
+        void syncAuthState(nextSession, { setLoading: true })
+      }, 0)
     })
 
     return () => {
